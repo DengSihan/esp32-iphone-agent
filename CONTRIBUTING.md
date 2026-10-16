@@ -14,6 +14,7 @@ cd server && pip install -e ".[dev]" && ruff check . && pytest
 ```
 
 Never commit secrets: `ios/Config/Local.xcconfig` and `hardware/hid_bridge/secrets.h` are git-ignored on purpose.
-Run data exported from the app is redacted, but check it before attaching it to an issue.
+Review and Diagnostics export raw run data; Settings › Privacy provides a separate redacted export.
+See [Export runs for agent review](docs/run-data-export.md), and check archives before attaching them to an issue.
 
 Code under `hardware/hid_bridge/src/airplay/` is GPL-3.0 (ported from UxPlay); contributions there are GPL-3.0 too.

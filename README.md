@@ -55,6 +55,8 @@ iPhone ──Screen Mirroring (Wi-Fi)──▶ ESP32-S3: AirPlay receiver ──
   settle and tells the model whether anything changed. A lost board, hotspot or mirroring link pauses the run and
   resumes it from the same step.
 - **Review.** Every run is kept on the phone: replay it step by step with the taps and swipes drawn on top.
+  Export the screenshots, actions and saved annotations from **Runs → open a run → ⋯ → Export trace** for analysis
+  by another agent. See [Export runs for agent review](docs/run-data-export.md) for batch export, USB copying and file details.
 
 ## Hardware
 

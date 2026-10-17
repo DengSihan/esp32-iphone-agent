@@ -92,7 +92,9 @@ import UIKit
         pointer.screenAspect = { DeviceScreen.aspect }
         pointer.locate = { [weak self] jpeg in await self?.locatePointer(jpeg) }
         DebugLog.relay = { [weak self] line in
-            MainActor.assumeIsolated { if !MockMode.on { self?.board.commands.relayLog(line) } }
+            // DebugLog.write runs on any thread (MetricKit delivers crash reports on a background queue).
+            let relay = { MainActor.assumeIsolated { if !MockMode.on { self?.board.commands.relayLog(line) } } }
+            Thread.isMainThread ? relay() : DispatchQueue.main.async(execute: relay)
         }
         board.commands.onAppCommand = { [weak self] line in self?.handleAppCommand(line) }
         DebugLog.write("app launched \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "")"

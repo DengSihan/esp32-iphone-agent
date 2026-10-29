@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hidagent"
 version = "0.1.0"
-description = "Let an AI model use a real iPhone through an ESP32 USB HID bridge and AirPlay mirroring"
+description = "Let an AI model use a real iPhone through an ESP32 USB HID bridge and AirPlay mirroring (BLE relay on a Mac, or the legacy TCP + UxPlay setup)"
 requires-python = ">=3.10"
 license = "MIT"
-dependencies = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "pillow>=10"]
+dependencies = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "pillow>=10", "bleak>=0.22", "av>=12"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]

@@ -240,12 +240,59 @@ $("clear").addEventListener("click", async () => {
 $("estop").addEventListener("click", () => post("/api/agent/stop"));
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("zoom").open) post("/api/agent/stop"); });
 
+// ---- the board (BLE link): setup texts, link numbers, hotspot --------------------------
+
+let linkMode = "";
+function useLink(link, source) {  // setup texts: legacy Wi-Fi board, BLE board video, or BLE board + UxPlay here
+  const mode = `${link}/${source}`;
+  if (mode === linkMode) return;
+  linkMode = mode;
+  const ble = link !== "tcp";  // ble, or the simulated board
+  const mac = ble && source === "uxplay";
+  const suffix = { s1: ble ? "_ble" : "", s1d: ble ? "_ble" : "", s2: mac ? "_mac" : ble ? "_ble" : "",
+                   s2d: mac ? "_mac" : ble ? "_ble" : "" };
+  document.querySelectorAll("#setup [data-i18n]").forEach((e) => {
+    const base = e.dataset.i18n.replace(/_(ble|mac)$/, "");
+    if (base in suffix) e.dataset.i18n = base + suffix[base];
+  });
+  $("board").hidden = !ble;
+  $("snap").hidden = !ble || mac;
+  $("show-pass").dataset.off = mac ? "1" : "";  // the board's hotspot is not needed when this Mac receives AirPlay
+  applyLang();
+}
+
+let pass = null;  // the hotspot password, shown only after a click
+function renderBoard(b) {
+  if (!b) return;
+  const parts = [`${t("board")}: ${b.state === "connected" ? `${b.name} · USB ${b.usb ?? "–"}` : b.state || t("noBoard")}`];
+  if (b.state === "connected") {
+    parts.push(`AirPlay ${b.airplay ?? "–"}`);
+    if (b.size?.[0]) parts.push(`${b.size[0]}×${b.size[1]} ${b.fps ?? "–"} fps`);
+    parts.push(b.frame_mode === "uxplay" ? "screen: UxPlay on this Mac" : `BLE ${b.ble_kbps} kbps · ${b.frame_mode}${b.stream ? "" : " (stream off)"}`);
+    if (b.frame_age != null) parts.push(`frame ${b.frame_age}s`);
+    if (b.note) parts.push(b.note);
+  }
+  $("board-text").textContent = parts.join(" · ");
+  $("show-pass").hidden = !b.ssid || $("show-pass").dataset.off === "1";
+  $("show-pass").textContent = t(pass ? "hidePass" : "showPass");
+  $("hotspot").textContent = b.ssid && b.net !== "sta" && !$("show-pass").dataset.off ? `Wi-Fi: ${b.ssid}${pass ? `  ·  ${pass}` : ""}` : "";
+}
+$("show-pass").addEventListener("click", async () => {
+  if (pass) { pass = null; return; }
+  const r = await fetch("/api/board/hotspot");
+  const data = await r.json().catch(() => ({}));
+  pass = r.ok ? data.pass : null;
+  $("msg").textContent = r.ok ? "" : data.detail || r.statusText;
+});
+
 // ---- polling -------------------------------------------------------------------------
 
 let shown = "";
 async function poll() {
   try {
     const s = await (await fetch("/api/status")).json();
+    useLink(s.link, s.screen_source);
+    renderBoard(s.board);
     let ready = true;
     $("setup").querySelectorAll("li").forEach((li) => { const ok = s[li.dataset.key]; li.classList.toggle("done", ok); ready &&= ok; });
     $("setup").classList.toggle("all-done", ready);

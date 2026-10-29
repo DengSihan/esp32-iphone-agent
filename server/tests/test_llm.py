@@ -51,3 +51,39 @@ def test_extra_body_and_image_are_sent():
     body = seen[0]
     assert body["reasoning_effort"] == "none"
     assert body["messages"][1]["content"][0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_temperature_is_dropped_for_models_that_only_take_the_default():
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        if "max_completion_tokens" not in body:
+            return httpx.Response(400, json={"error": {"message": "Use 'max_completion_tokens' instead."}})
+        if "temperature" in body:
+            return httpx.Response(400, json={"error": {"message": "Unsupported value: 'temperature' does not "
+                                                                  "support 0 with this model."}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "DO: wait"}}]})
+
+    llm = LLM("http://test/v1", "gpt-6")
+    llm._http = httpx.AsyncClient(base_url="http://test/v1", transport=httpx.MockTransport(handle))
+    assert asyncio.run(llm.chat("sys", "hi")) == "DO: wait"
+    assert asyncio.run(llm.chat("sys", "again", temperature=0.4)) == "DO: wait"
+    assert len(seen) == 4 and "temperature" not in seen[-1]  # learned once, then sent right the first time
+
+
+def test_an_answer_lost_to_reasoning_is_asked_again_with_more_room():
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body["max_tokens"])
+        if body["max_tokens"] < 1000:
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "DO: home"}, "finish_reason": "stop"}]})
+
+    llm = LLM("http://test/v1", "r1")
+    llm._http = httpx.AsyncClient(base_url="http://test/v1", transport=httpx.MockTransport(handle))
+    assert asyncio.run(llm.chat("sys", "hi")) == "DO: home"
+    assert seen == [600, 2400]

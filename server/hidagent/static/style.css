@@ -91,6 +91,9 @@ body.still .hand { animation: none; }
 .setup li.done span { display: none; }
 .setup li.done::before { border-color: var(--ok); background: var(--ok); }
 .setup.all-done { display: none; }
+.board { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font: 12px ui-monospace, monospace; color: var(--muted); }
+.board button { font-size: 12px; padding: 2px 8px; }
+.board .hotspot { color: var(--fg); }
 
 .task { display: flex; flex-direction: column; gap: 8px; }
 .examples { display: flex; flex-wrap: wrap; gap: 6px; }

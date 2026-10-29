@@ -4,12 +4,14 @@ import asyncio
 import json
 import logging
 import math
+import os
 import re
 import time
+from pathlib import Path
 
 from . import vision
 from .debug import Trace
-from .device import DeviceError
+from .device import BoardTimeout, DeviceError
 from .llm import LLM
 from .phone import Phone
 from .screen import Screen
@@ -65,6 +67,19 @@ Actions:
 Example:
 THINK: My last tap opened the home screen as intended. The App Store icon is visible, so I tap it.
 DO: tap 152 362"""
+
+PROMPTS_DIR = Path(os.environ.get("PROMPTS_DIR", Path(__file__).resolve().parents[2] / "prompts"))
+
+
+def load_prompt(name: str, builtin: str) -> str:
+    """The repository's prompts/<name>.md plus prompts/app-rules.md, as the iOS app sends them (each file
+    without its final newline); the built-in copy when the folder is not there (e.g. an installed package)."""
+    try:
+        text, rules = ((PROMPTS_DIR / f).read_text(encoding="utf-8") for f in (f"{name}.md", "app-rules.md"))
+    except OSError:
+        return builtin
+    return text.removesuffix("\n") + "\n" + rules.removesuffix("\n")
+
 
 META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "changed")  # not part of the action
 
@@ -125,10 +140,13 @@ class BlindError(RuntimeError):
 
 class Agent:
     def __init__(self, phone: Phone, screen: Screen, actor: LLM, planner: LLM, trace: Trace,
-                 max_steps: int = 40, max_failures: int = 3):
+                 max_steps: int = 40, max_failures: int = 3, reconnect_wait: float = 90):
         self.phone, self.screen, self.actor, self.planner = phone, screen, actor, planner
         self.trace = trace
         self.max_steps, self.max_failures = max_steps, max_failures
+        self.reconnect_wait = reconnect_wait  # s a run pauses for a lost board or mirroring before it gives up
+        self.planner_prompt = load_prompt("planner", PLANNER_PROMPT)
+        self.actor_prompt = load_prompt("actor", ACTOR_PROMPT)
         self.task, self.plan, self.steps = "", "", []
         self.shots: dict[int, bytes] = {}  # step index -> screenshot the model decided on
         self._pointer = (0.0, 0.0)  # last pointer position (screen fractions)
@@ -167,7 +185,7 @@ class Agent:
     async def _ask(self, role: str, llm: LLM, system: str, prompt: str,
                    temperature: float = 0) -> tuple[str, float, bytes | None]:
         if not self.screen.live:  # never let the model act blind
-            raise BlindError("lost the phone screen: reconnect Screen Mirroring")
+            await self._wait_for_screen()
         frame, started = self.screen.frame, time.time()
         reply = await llm.chat(system, prompt, frame, temperature=temperature)
         seconds = round(time.time() - started, 2)
@@ -175,9 +193,21 @@ class Agent:
                          reply=reply, seconds=seconds)
         return reply, seconds, frame
 
+    async def _wait_for_screen(self) -> None:
+        """The board or mirroring went away mid-run: pause until the screen is live again, then go on."""
+        self._record(action="wait", reason="lost the phone screen: waiting for the board and Screen Mirroring")
+        deadline = time.time() + self.reconnect_wait
+        while not self.screen.live:
+            if time.time() > deadline:
+                raise BlindError("lost the phone screen: reconnect the board and Screen Mirroring")
+            await asyncio.sleep(0.5)
+        await self.phone.reset()  # a gesture cut off mid-way: let go and re-home
+        log.info("agent: frame after reconnect: %s", await self.screen.prepare())
+
     async def _run(self) -> None:
         failures = 0
         try:
+            log.info("agent: first frame: %s", await self.screen.prepare())
             await self._replan()
             for _ in range(self.max_steps):
                 try:
@@ -188,7 +218,8 @@ class Agent:
                     raise
                 except Exception as e:  # a bad reply or a dropped link: recover, don't crash
                     self._record(action="hiccup", reason=str(e)[:300])
-                    board_drop = isinstance(e, DeviceError) and await self.phone.device.wait_connected(15)
+                    board_drop = (isinstance(e, DeviceError) and not isinstance(e, BoardTimeout)
+                                  and await self.phone.device.wait_connected(15))
                     failures += 0 if board_drop else 1  # the board came back: not the agent's fault
                     if failures >= self.max_failures:
                         self._record(action="fail", reason=f"{failures} errors in a row")
@@ -207,6 +238,7 @@ class Agent:
         seen = acts[0]["_shot"]
         spots = [self._pointer]  # where the pointer was and goes: pointer moves are not screen changes
         stuck = self._repeating(acts[0])
+        acted = time.time()  # when the last gesture ended: the next frame must be newer
         for i, act in enumerate(acts):
             name = act["action"]
             if name == "replan" or stuck:
@@ -216,7 +248,8 @@ class Agent:
             if name not in ("done", "fail"):
                 started = time.time()
                 await self._do(act)
-                act["act_s"] = round(time.time() - started, 2)
+                acted = time.time()
+                act["act_s"] = round(acted - started, 2)
                 spots += _pointer_path(act)
                 self._pointer = spots[-1]
             self._record(act.pop("_shot"), **act)
@@ -224,11 +257,11 @@ class Agent:
                 return True
             following = acts[i + 1]["action"] if i < len(acts) - 1 else None
             if name == "tap" and following in ("type", "key"):  # typing into a field that a missed tap never opened
-                await self.screen.settled()
+                await self.screen.after_action(acted)
                 if not vision.changed(seen, self.screen.frame, ignore=tuple(spots)):
                     self.steps[-1]["changed"] = False
                     return False  # skip the rest; the actor looks again
-        await self.screen.settled()
+        await self.screen.after_action(acted)
         # feedback for the next round
         self.steps[-1]["changed"] = vision.changed(seen, self.screen.frame, ignore=tuple(spots))
         return False
@@ -252,7 +285,7 @@ class Agent:
             last = self.steps[-1] if self.steps else {}
             prompt += (f"\n\nThe previous plan got stuck (last event: {last.get('action')} {last.get('reason', '')}):"
                        f"\n{self.plan}\nLook at the current screen and plan from here, another way if needed.")
-        reply, seconds, frame = await self._ask("planner", self.planner, PLANNER_PROMPT, prompt)
+        reply, seconds, frame = await self._ask("planner", self.planner, self.planner_prompt, prompt)
         self.plan, plan_zh = parse_plan(reply)
         self._record(frame, action="replan (stuck)" if stuck else "plan", plan=self.plan, plan_zh=plan_zh,
                      think_s=seconds)
@@ -266,7 +299,7 @@ class Agent:
                             for s in self.steps[-8:] if "plan" not in s) or "(none)"
         prompt = f"Goal: {self.task}\n\nPlan:\n{self.plan}\n\nRecent actions:\n{history}\n\nNext action?"
         for attempt in range(3):  # retry unparseable replies, a little less deterministically
-            reply, seconds, frame = await self._ask("actor", self.actor, ACTOR_PROMPT, prompt, 0.4 * attempt)
+            reply, seconds, frame = await self._ask("actor", self.actor, self.actor_prompt, prompt, 0.4 * attempt)
             try:
                 acts = parse_actions(reply)
             except ValueError as e:

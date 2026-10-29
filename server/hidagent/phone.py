@@ -14,7 +14,7 @@ from collections import deque
 from pathlib import Path
 
 from . import vision
-from .device import Device
+from .device import DeviceError, Link
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ MAX_MISS = 0.06         # bigger misses are still corrected, but not learned fro
 
 
 class Phone:
-    def __init__(self, device: Device, calibration_file: Path, screen=None):
+    def __init__(self, device: Link, calibration_file: Path, screen=None):
         self.device, self._file, self.screen = device, calibration_file, screen
         # mouse units needed to cross the full screen width / height
         saved = json.loads(calibration_file.read_text()) if calibration_file.exists() else None
@@ -117,7 +117,7 @@ class Phone:
         await self.screen.settled(quiet=0.15, least=0.1, most=0.6)  # pointer at rest
         before, sent = self.screen.frame, time.time()
         await self.device.send(f"move {nudge} 0")
-        after = await self.screen.fresh(sent, 0.6)
+        after = await self.screen.fresh(sent, 1.2)  # BLE frames arrive a few hundred ms late
         if after:
             await self.screen.settled(quiet=0.1, least=0.05, most=0.4)
             after = self.screen.frame
@@ -209,10 +209,22 @@ class Phone:
         await self.device.send(f"key {combo}")
 
     async def go_home(self) -> None:
-        await self.swipe(0.5, 0.995, 0.5, 0.6, hold=False)  # resting here would open the app switcher
+        """The board's consumer-control Home key ("AC Home", current firmware); older boards answer an error:
+        then Cmd+H and the flick up from the home bar (a flick, not a rest: resting opens the app switcher)."""
+        try:
+            await self.device.send("homescreen")
+            return
+        except DeviceError as e:
+            if "unknown command" not in str(e):
+                raise
+        await self.key("cmd+h")
+        await asyncio.sleep(0.35)
+        await self.swipe(0.5, 0.995, 0.5, 0.45, hold=False)
+        self._pos = None  # starting at the screen's edge may have clamped the pointer: re-home before the next move
 
     async def go_back(self) -> None:
         await self.swipe(0.005, 0.45, 0.6, 0.45, hold=False)
+        self._pos = None
 
     def _dx(self, x: float) -> int:
         return round(min(max(self._fix(x, "x"), 0), 1) * self.span["w"])

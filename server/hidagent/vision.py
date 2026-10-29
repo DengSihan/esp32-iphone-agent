@@ -1,6 +1,7 @@
 """Small image checks on screen frames: did the screen change, and where is the pointer."""
 
 import io
+from collections import Counter
 
 from PIL import Image, ImageChops
 
@@ -55,6 +56,15 @@ def pointer(before: bytes, after: bytes, near: tuple[float, float], shift: float
     hits = [(i % bw, i // bw) for i, v in enumerate(diff) if v > 30]
     if not 15 <= len(hits) <= len(diff) // 4:  # nothing moved, or much more than a pointer
         return None
+    # H.264 over BLE leaves stray changed pixels (compression noise) around the screen: keep the densest spot,
+    # as long as it holds nearly all the change
+    cell = max(4, int(0.03 * w))
+    (gx, gy), _ = Counter((x // cell, y // cell) for x, y in hits).most_common(1)[0]
+    mx, my = (gx + 0.5) * cell, (gy + 0.5) * cell
+    spot = [(x, y) for x, y in hits if abs(x - mx) <= 0.075 * w and abs(y - my) <= 0.035 * h]
+    if len(spot) < 15 or len(spot) < 0.8 * len(hits):
+        return None
+    hits = spot
     xs, ys = [x for x, _ in hits], [y for _, y in hits]
     if max(xs) - min(xs) > 0.15 * w or max(ys) - min(ys) > 0.07 * h:  # not one compact spot
         return None

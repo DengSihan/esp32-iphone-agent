@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -10,11 +11,19 @@ import time
 log = logging.getLogger(__name__)
 
 
+def uxplay() -> str:
+    """The UxPlay binary: on PATH, or where a build or Homebrew puts it (a shell may not have those on its PATH)."""
+    places = (os.path.expanduser("~/.local/bin/uxplay"), "/opt/homebrew/bin/uxplay", "/usr/local/bin/uxplay")
+    return shutil.which("uxplay") or next((p for p in places if os.path.exists(p)), "uxplay")
+
+
 class Screen:
     """Runs UxPlay with a GStreamer sink that writes JPEGs into a pipe; keeps the latest one."""
 
-    def __init__(self, name: str = "iPhone Agent", fps: int = 8, quality: int = 75):
-        self.name, self.fps, self.quality = name, fps, quality
+    def __init__(self, name: str = "iPhone Agent", fps: int = 8, quality: int = 75, port: int | None = None):
+        """port: UxPlay's first TCP/UDP port (it uses port..port+2) instead of 7100/7000/7001, e.g. when macOS's own
+        AirPlay Receiver already holds 7000."""
+        self.name, self.fps, self.quality, self.port = name, fps, quality, port
         self.frame: bytes | None = None
         self.updated = 0.0
         self._proc = None
@@ -33,10 +42,13 @@ class Screen:
         """Keep UxPlay running: it exits on some disconnects, so restart it every time."""
         while not self._stopping:
             read_fd, write_fd = os.pipe()
-            sink = (f"videorate drop-only=true ! video/x-raw,framerate={self.fps}/1 ! "
-                    f"jpegenc quality={self.quality} ! fdsink fd={write_fd}")
+            # every decoded frame becomes a JPEG (AirPlay sends frames only when the screen changes). No videorate:
+            # with -vsync no UxPlay leaves buffers without timestamps, and videorate then passes only the first one
+            sink = f"jpegenc quality={self.quality} ! fdsink fd={write_fd}"
+            ports = ["-p", str(self.port)] if self.port else []
             self._proc = subprocess.Popen(
-                ["uxplay", "-n", self.name, "-nh", "-a", "-reset", "0", "-vs", sink],
+                # -vsync no: show each frame as it arrives (live streaming), not on audio-sync timestamps
+                [uxplay(), "-n", self.name, "-nh", "-a", "-reset", "0", "-vsync", "no", *ports, "-vs", sink],
                 pass_fds=(write_fd,))  # UxPlay logs to stdout: keep them in ours
             os.close(write_fd)
             log.info("AirPlay receiver '%s' started (pid %d)", self.name, self._proc.pid)
@@ -52,17 +64,21 @@ class Screen:
         if not running or self.frame is None:
             return False
         clients = self._clients()
-        if clients is not None:  # Linux: is a phone connected to UxPlay right now?
+        if clients is not None:  # is a phone connected to UxPlay right now?
             return clients > 0
-        return time.time() - self.updated < 90  # elsewhere: AirPlay sends no frames while the screen is still
+        return time.time() - self.updated < 90  # unknown: AirPlay sends no frames while the screen is still
 
     def _clients(self) -> int | None:
         """Established TCP connections of the UxPlay process (a mirroring phone keeps some open).
 
-        Read from /proc, cached for a second; None where /proc is not available (e.g. macOS).
+        Read from /proc (Linux) or lsof (macOS), cached for a second; None when neither works.
         """
         if time.time() - self._clients_at < 1:
             return self._clients_n
+        if not os.path.isdir("/proc"):
+            n = self._lsof_clients()
+            self._clients_at, self._clients_n = time.time(), n
+            return n
         try:
             fds = os.listdir(f"/proc/{self._proc.pid}/fd")
             inodes = set()
@@ -81,6 +97,14 @@ class Screen:
         self._clients_at, self._clients_n = time.time(), n
         return n
 
+    def _lsof_clients(self) -> int | None:
+        try:
+            out = subprocess.run(["lsof", "-nP", "-a", "-p", str(self._proc.pid), "-iTCP", "-sTCP:ESTABLISHED", "-Fn"],
+                                 capture_output=True, text=True, timeout=2).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return sum(line.startswith("n") for line in out.splitlines())
+
     @property
     def aspect(self) -> float:
         """Frame width / height, read from the JPEG header (portrait iPhone as a fallback)."""
@@ -96,6 +120,14 @@ class Screen:
         await asyncio.sleep(least)
         while time.time() - self.updated < quiet and time.time() - started < most:
             await asyncio.sleep(0.1)
+
+    async def prepare(self) -> str:
+        """Start of a run: UxPlay's frames need no setup (blescreen.BleScreen turns its stream on here)."""
+        return "live"
+
+    async def after_action(self, since: float) -> None:
+        """After a gesture that ended at `since`: wait until the screen shows its result."""
+        await self.settled()
 
     async def fresh(self, since: float, timeout: float = 0.8) -> bytes | None:
         """The first frame received after `since`, or None if none arrives in time."""

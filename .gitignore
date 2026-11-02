@@ -22,3 +22,4 @@ hardware/hid_bridge/build/
 hardware/tests/test
 hardware/tests/test.dSYM/
 hardware/tools/out/
+server/out/

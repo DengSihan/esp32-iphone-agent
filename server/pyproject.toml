@@ -20,7 +20,7 @@ Homepage = "https://github.com/onehumanbeing/esp32-iphone-agent"
 packages = ["hidagent"]
 
 [tool.setuptools.package-data]
-hidagent = ["static/*"]
+hidagent = ["static/*", "native/*.c"]
 
 [tool.ruff]
 line-length = 120

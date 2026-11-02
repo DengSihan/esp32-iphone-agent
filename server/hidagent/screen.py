@@ -8,6 +8,8 @@ import subprocess
 import threading
 import time
 
+from .media_transport import capture_plugin_env, read_packets
+
 log = logging.getLogger(__name__)
 
 
@@ -29,12 +31,17 @@ class Screen:
         self._proc = None
         self._clients_at, self._clients_n = 0.0, None
         self._stopping = False
+        from .recording import StreamRecorder
+
+        self.recorder = StreamRecorder(live=lambda: self.live)
 
     def start(self) -> None:
+        self._receiver_env = capture_plugin_env()
         threading.Thread(target=self._supervise, daemon=True).start()
 
     def stop(self) -> None:
         self._stopping = True
+        self.recorder.stop("shutdown")
         if self._proc:
             self._proc.terminate()
 
@@ -42,19 +49,33 @@ class Screen:
         """Keep UxPlay running: it exits on some disconnects, so restart it every time."""
         while not self._stopping:
             read_fd, write_fd = os.pipe()
-            # every decoded frame becomes a JPEG (AirPlay sends frames only when the screen changes). No videorate:
-            # with -vsync no UxPlay leaves buffers without timestamps, and videorate then passes only the first one
-            sink = f"jpegenc quality={self.quality} ! fdsink fd={write_fd}"
+            audio_read, audio_write = os.pipe()
+            sink = f"jpegenc quality={self.quality} ! handysink fd={write_fd}"
             ports = ["-p", str(self.port)] if self.port else []
-            self._proc = subprocess.Popen(
-                # -vsync no: show each frame as it arrives (live streaming), not on audio-sync timestamps
-                [uxplay(), "-n", self.name, "-nh", "-a", "-reset", "0", "-vsync", "no", *ports, "-vs", sink],
-                pass_fds=(write_fd,))  # UxPlay logs to stdout: keep them in ours
+            try:
+                self._proc = subprocess.Popen(
+                    # Enable source PTS for BOTH AAC mirroring and ALAC audio. handysink
+                    # forwards buffers immediately with their clock metadata; no speaker output.
+                    [uxplay(), "-n", self.name, "-nh", "-reset", "0", "-vsync", "0", "-async", "0",
+                     *ports, "-vs", sink,
+                     "-as", f"audio/x-raw,format=S16LE,layout=interleaved ! handysink fd={audio_write}"],
+                    env=self._receiver_env, pass_fds=(write_fd, audio_write))
+            except Exception:
+                for fd in (read_fd, write_fd, audio_read, audio_write):
+                    os.close(fd)
+                log.exception("Cannot start timestamped AirPlay receiver")
+                self.recorder.fail("无法启动带时间戳的 AirPlay 接收器。")
+                return
             os.close(write_fd)
+            os.close(audio_write)
+            audio_thread = threading.Thread(target=self._read, args=(audio_read,), daemon=True)
+            audio_thread.start()
             log.info("AirPlay receiver '%s' started (pid %d)", self.name, self._proc.pid)
             self._read(read_fd)  # returns when UxPlay closes the pipe
             code = self._proc.wait()
+            audio_thread.join(timeout=2)
             self.frame = None
+            self.recorder.stop("connection_lost")
             log.warning("AirPlay receiver exited (code %s), restarting", code)
             time.sleep(1)
 
@@ -139,10 +160,15 @@ class Screen:
         return self.frame
 
     def _read(self, fd: int) -> None:
-        buf = b""
-        with os.fdopen(fd, "rb", buffering=0) as pipe:
-            while chunk := pipe.read(1 << 16):
-                buf += chunk
-                while (start := buf.find(b"\xff\xd8")) >= 0 and (end := buf.find(b"\xff\xd9", start)) >= 0:
-                    self.frame, self.updated = buf[start:end + 2], time.time()
-                    buf = buf[end + 2:]
+        try:
+            with os.fdopen(fd, "rb", buffering=0) as pipe:
+                for packet in read_packets(pipe):
+                    if packet.kind == 2:
+                        self.frame, self.updated = packet.data, time.time()
+                        self.recorder.video(packet.data, packet.pts_ns)
+                    else:
+                        self.recorder.audio(packet.data, packet.pts_ns, packet.rate, packet.channels,
+                                            packet.discontinuity)
+        except (OSError, ValueError):
+            log.exception("Timestamped AirPlay transport failed")
+            self.recorder.fail("音视频传输异常，采集已停止，请查看接收日志。")

@@ -11,12 +11,14 @@ TOKEN_PARAMS = ("max_tokens", "max_completion_tokens")
 
 class LLM:
     def __init__(self, base_url: str, model: str, api_key: str = "", extra: dict | None = None,
-                 token_param: str = "auto"):
+                 token_param: str = "auto", organization: str = ""):
         self.model, self.extra = model, extra or {}
         # "auto": send max_tokens; switch for good if the server asks for max_completion_tokens (newer OpenAI models)
         self.token_param, self._auto = (token_param, False) if token_param in TOKEN_PARAMS else ("max_tokens", True)
         self.temperature = True  # reasoning models (e.g. OpenAI's gpt-5 and later) only take the default: dropped then
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        if organization:
+            headers["OpenAI-Organization"] = organization
         self._http = httpx.AsyncClient(base_url=base_url.rstrip("/"), headers=headers, timeout=120)
 
     @classmethod
@@ -25,7 +27,8 @@ class LLM:
         def env(key, default=""):
             return os.environ.get(f"{role}_{key}") or os.environ.get(f"LLM_{key}", default)
         return cls(env("BASE_URL", "http://localhost:8000/v1"), env("MODEL"),
-                   env("API_KEY"), json.loads(env("EXTRA_BODY", "{}")), env("TOKEN_PARAM", "auto"))
+                   env("API_KEY"), json.loads(env("EXTRA_BODY", "{}")), env("TOKEN_PARAM", "auto"),
+                   env("ORGANIZATION"))
 
     async def chat(self, system: str, text: str, image: bytes | None = None,
                    max_tokens: int = 600, temperature: float = 0) -> str:

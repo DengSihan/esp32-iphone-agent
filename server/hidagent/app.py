@@ -68,6 +68,7 @@ async def lifespan(_):
     agent.stop()
     if SCREEN == "uxplay":
         screen.stop()
+        await asyncio.to_thread(screen.recorder.wait)
     if LINK == "tcp":
         server.close()
     else:
@@ -126,6 +127,7 @@ def status():
             "debug": DEBUG, "trace": str(agent.trace.dir or ""), "aspect": round(screen.aspect, 4),
             "link": LINK, "screen_source": SCREEN, "airplay_name": getattr(screen, "name", "ESP32 Agent"),
             "board": board_info(),
+            "recording": screen.recorder.status() if SCREEN == "uxplay" else None,
             "models": {"planner": agent.planner.model, "actor": agent.actor.model},
             "agent": {"running": agent.running, "task": agent.task, "steps": agent.steps}}
 
@@ -255,6 +257,8 @@ def calibrate_finish(p: Point):
 @app.post("/api/agent")
 async def agent_start(t: Text):
     try:
+        if not agent.planner.model or not agent.actor.model:
+            raise RuntimeError("请先配置规划模型和操作模型（支持看图），然后重启服务。手动采集无需模型。")
         agent.start(t.text)
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
@@ -265,6 +269,8 @@ async def agent_start(t: Text):
 async def agent_stop():
     """Emergency stop: cancel the agent and release the mouse button."""
     agent.stop()
+    if SCREEN == "uxplay":
+        screen.recorder.stop("agent_cancelled")
     await asyncio.sleep(0.1)  # let a gesture in flight finish its own release
     return await act(phone.reset()) if device.connected else {"ok": True}
 
@@ -277,3 +283,38 @@ def agent_clear():
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     return {"ok": True}
+
+
+@app.post("/api/recording/start")
+def recording_start(t: Text):
+    if SCREEN != "uxplay" or not screen.live:
+        raise HTTPException(409, "请先将手机投屏到此控制台的 iPhone Agent。")
+    if agent.running:
+        raise HTTPException(409, "AI 运行中由录制动作控制，请先停止任务再手动采集。")
+    try:
+        return screen.recorder.start(t.text)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/recording/stop")
+def recording_stop():
+    if SCREEN != "uxplay":
+        raise HTTPException(409, "此画面来源不支持音视频采集。")
+    return screen.recorder.stop()
+
+
+@app.get("/api/recordings")
+def recordings():
+    return screen.recorder.recordings() if SCREEN == "uxplay" else []
+
+
+@app.get("/api/recordings/{recording_id}/{name}")
+def recording_file(recording_id: str, name: str):
+    if SCREEN != "uxplay":
+        raise HTTPException(404)
+    try:
+        path = screen.recorder.file(recording_id, name)
+    except (OSError, ValueError, KeyError) as exc:
+        raise HTTPException(404, "File not found") from exc
+    return FileResponse(path)

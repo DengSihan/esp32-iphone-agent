@@ -86,7 +86,8 @@ META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "chan
 # action name -> argument names; numeric arguments are 0-1000 screen coordinates
 ACTIONS = {"tap": ("x", "y"), "swipe": ("x1", "y1", "x2", "y2"), "circle": ("x", "y", "r"), "path": ("points",),
            "type": ("text",), "key": ("combo",), "done": ("answer",), "fail": ("reason",),
-           "home": (), "back": (), "wait": (), "replan": ()}
+           "home": (), "back": (), "wait": (), "replan": (),
+           "record_start": (), "record_wait": ("seconds",), "record_stop": ()}
 TEXT_ARGS = ("text", "combo", "answer", "reason")
 
 
@@ -107,6 +108,8 @@ def parse_command(line: str) -> dict:
     if len(numbers) != len(keys):
         raise ValueError(f"{name} needs {len(keys)} numbers: {line[:100]}")
     action = {"action": name, **dict(zip(keys, numbers, strict=True))}
+    if name == "record_wait" and not 1 <= action["seconds"] <= 180:
+        raise ValueError("record_wait requires 1..180 seconds")
     if name == "tap" and "precise" in rest.lower():
         action["precise"] = True
     return action
@@ -147,6 +150,22 @@ class Agent:
         self.reconnect_wait = reconnect_wait  # s a run pauses for a lost board or mirroring before it gives up
         self.planner_prompt = load_prompt("planner", PLANNER_PROMPT)
         self.actor_prompt = load_prompt("actor", ACTOR_PROMPT)
+        if getattr(screen, "recorder", None) is not None:
+            recording_prompt = """
+This Mac can capture the current AirPlay video AND audio locally without disconnecting mirroring.
+Additional DO actions: record_start; record_wait SECONDS (1..180); record_stop.
+For a requested voice/video capture: first locate and visually verify the requested chat and message;
+then record_start BEFORE tapping play. If opening the video autoplays it, begin recording before opening it.
+Use record_wait for the visible full duration plus a small margin (e.g. 80 for a 1:18 video).
+While waiting do not tap, seek, change volume, leave the chat or send any message. Recording lasts at most
+180 seconds. If longer, fail and explain the limit instead of claiming a full capture.
+After waiting, record_stop saves the files and returns capture_id and whether audio was received.
+Report the saved capture and let the user replay it in the page. You have NOT heard or understood the
+audio: no transcription model is connected here. Do not claim the recording is complete or synchronized
+merely because a file exists. Never send a message when the task only asks to capture media.
+"""
+            self.actor_prompt += recording_prompt
+            self.planner_prompt += recording_prompt
         self.task, self.plan, self.steps = "", "", []
         self.shots: dict[int, bytes] = {}  # step index -> screenshot the model decided on
         self._pointer = (0.0, 0.0)  # last pointer position (screen fractions)
@@ -231,6 +250,10 @@ class Agent:
             self._record(action="stopped")
         except Exception as e:  # e.g. the planner itself is unreachable
             self._record(action="error", reason=repr(e))
+        finally:
+            recorder = getattr(self.screen, "recorder", None)
+            if recorder and recorder.status()["current"] and recorder.status()["current"]["state"] == "recording":
+                recorder.stop("agent_cancelled")
 
     async def _step(self) -> bool:
         """One see-think-act round (one or more actions). Returns True when the task is over."""
@@ -326,6 +349,35 @@ class Agent:
             case "home": await self.phone.go_home()
             case "back": await self.phone.go_back()
             case "wait": pass
+            case "record_start":
+                recorder = getattr(self.screen, "recorder", None)
+                if recorder is None or not self.screen.live:
+                    raise RuntimeError("recording needs the live UxPlay screen")
+                result = recorder.start(self.task)
+                a["capture_id"] = result["current"]["id"]
+            case "record_wait":
+                recorder = getattr(self.screen, "recorder", None)
+                if not recorder or not recorder.status()["current"]:
+                    raise RuntimeError("call record_start before record_wait")
+                deadline = time.monotonic() + a["seconds"]
+                while time.monotonic() < deadline:
+                    if not self.screen.live:
+                        recorder.stop("connection_lost")
+                        raise BlindError("mirroring disconnected during recording; partial capture saved")
+                    if recorder.status()["current"]["state"] != "recording":
+                        raise RuntimeError("recording ended before the requested duration")
+                    await asyncio.sleep(.25)
+            case "record_stop":
+                recorder = getattr(self.screen, "recorder", None)
+                if recorder is None or not recorder.status()["current"]:
+                    raise RuntimeError("no recording has been started")
+                recorder.stop("agent_finished")
+                current = (await asyncio.to_thread(recorder.wait))["current"]
+                a["capture_id"] = current["id"]
+                a["capture_state"] = current["state"]
+                a["audio_received_seconds"] = current.get("audio_received_seconds", 0)
+                if current["state"] != "ready":
+                    raise RuntimeError("capture needs review: " + "; ".join(current["errors"]))
             case other: raise ValueError(f"unknown action {other!r}")
 
 

@@ -6,6 +6,55 @@ import httpx
 from hidagent.llm import LLM
 
 
+def test_organization_and_key_are_headers_with_role_overrides(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    monkeypatch.setenv("LLM_API_KEY", "test-shared-key")
+    monkeypatch.setenv("LLM_ORGANIZATION", "org-test-shared")
+    monkeypatch.setenv("ACTOR_API_KEY", "test-actor-key")
+    monkeypatch.setenv("ACTOR_ORGANIZATION", "org-test-actor")
+    monkeypatch.delenv("PLANNER_API_KEY", raising=False)
+    monkeypatch.delenv("PLANNER_ORGANIZATION", raising=False)
+
+    async def verify():
+        for role, expected_key, expected_org in (
+            ("ACTOR", "test-actor-key", "org-test-actor"),
+            ("PLANNER", "test-shared-key", "org-test-shared"),
+        ):
+            llm = LLM.from_env(role)
+            seen = []
+
+            def handle(request, seen=seen):
+                seen.append(request)
+                return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+            original = llm._http
+            llm._http = httpx.AsyncClient(base_url=original.base_url, headers=original.headers,
+                                          transport=httpx.MockTransport(handle))
+            await original.aclose()
+            try:
+                assert await llm.chat("system", "hello") == "ok"
+                assert seen[0].headers["Authorization"] == f"Bearer {expected_key}"
+                assert seen[0].headers["OpenAI-Organization"] == expected_org
+                assert expected_key not in seen[0].content.decode()
+                assert expected_org not in seen[0].content.decode()
+            finally:
+                await llm._http.aclose()
+
+    asyncio.run(verify())
+
+
+def test_organization_is_omitted_when_unset():
+    async def verify():
+        llm = LLM("https://api.openai.com/v1", "test-model", "test-key")
+        try:
+            assert "OpenAI-Organization" not in llm._http.headers
+        finally:
+            await llm._http.aclose()
+
+    asyncio.run(verify())
+
+
 def fake_server(llm: LLM, wants: str) -> list[dict]:
     """Point the client at an in-memory endpoint that only accepts the `wants` token parameter."""
     seen = []

@@ -34,7 +34,7 @@ jobs:
       - name: Host tests (bplist, GOP buffer)
         run: make -C hardware/tests
 
-  server:  # legacy v0.1.0 architecture, kept working
+  server:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -47,6 +47,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+      - name: Media capture test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg pkg-config libgstreamer1.0-dev gstreamer1.0-tools gstreamer1.0-plugins-base
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: pytest -q

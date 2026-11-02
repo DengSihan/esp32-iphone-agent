@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>音视频采集验证</title>
+<style>
+  *{box-sizing:border-box}body{margin:0;background:#f5f6f8;color:#20242b;font:15px/1.65 system-ui,sans-serif}
+  main{max-width:960px;margin:40px auto;padding:0 24px}h1{font-size:28px;margin:8px 0}h2{font-size:18px;margin:0 0 12px}
+  .tag{font-size:12px;letter-spacing:.08em;color:#576575}.muted{color:#626b78}.card{background:white;border:1px solid #dce1e8;border-radius:16px;padding:24px;margin:20px 0}
+  .actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}button{border:0;border-radius:9px;background:#185ce5;color:white;padding:12px 20px;font:inherit;cursor:pointer}
+  button.stop{background:#b83131}button:disabled{opacity:.4;cursor:default}#state{font-weight:600}#error,.warning{color:#a13320;white-space:pre-wrap;overflow-wrap:anywhere}
+  ol{padding-left:22px}li{margin:7px 0}code{background:#edf1f6;padding:2px 6px;border-radius:4px}video{display:block;max-width:100%;max-height:500px;background:#111;border-radius:8px;margin:12px 0}
+  audio{display:block;width:100%;margin:12px 0}a{color:#185ce5;margin-right:16px}pre{overflow:auto;font-size:12px;background:#f5f6f8;padding:12px;border-radius:8px}.record{border-top:1px solid #e4e7ec;padding-top:18px;margin-top:18px}
+  #elapsed{font-variant-numeric:tabular-nums}#results:empty::after{content:'还没有采集文件。完成一次采集后，视频和音频会显示在这里。';color:#626b78}
+</style>
+<main>
+  <div class="tag">ESP32 iPhone Agent · 本地验证</div>
+  <h1>音视频采集验证</h1>
+  <p class="muted">手动播放手机内容，保存 AirPlay 接收到的音视频，检查声音、完整性与同步。文件仅保存在这台 Mac。</p>
+  <section class="card">
+    <h2>采集一段测试内容</h2>
+    <ol>
+      <li>点击「开始采集」，再在 iPhone 的「屏幕镜像」中选择 <strong>iPhone Media Test</strong>。手机与 Mac 保持在同一网络。</li>
+      <li>手动播放一条微信语音或一段带声音的视频，建议先试 10～20 秒。播放期间保持投屏连接。</li>
+      <li>播放结束后点击「停止并保存」，等待下方出现文件，再回放检查。每次最多运行 180 秒（含等待连接的时间）。</li>
+    </ol>
+    <div class="actions">
+      <button id="start">开始采集</button>
+      <button class="stop" id="stop" disabled>停止并保存</button>
+      <span id="state" role="status">正在连接验证服务…</span>
+      <span class="muted" id="elapsed"></span>
+    </div>
+    <p class="muted" id="detail">采集时 Mac 不外放声音；保存后可以回放。每次开始采集后，需要在手机上选择此接收器。</p>
+    <p id="error" role="alert"></p>
+  </section>
+  <section class="card">
+    <h2>采集结果</h2>
+    <p class="muted">有音轨不等于录到了语音，检测到声音也不代表内容完整。请回放确认首尾、内容和音画同步。</p>
+    <div id="results"></div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let busy = false, lastVersion = '', pollBusy = false;
+const names = {listening:'接收器已启动',finalizing:'正在保存和检查文件…',ready:'文件已保存，待回放核验',failed:'本次采集需要检查'};
+function el(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  if (className) node.className = className;
+  return node;
+}
+async function request(path, method='GET') {
+  const response = await fetch(path, {method, headers: {'X-Capture-Lab':'1'}});
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.detail || '请求失败');
+  return body;
+}
+function fileUrl(id, name) { return `/files/${encodeURIComponent(id)}/${encodeURIComponent(name)}`; }
+function link(parent, id, name, label) {
+  const a=el('a',label); a.href=fileUrl(id,name); a.download=name; parent.append(a);
+}
+function showRecords(records) {
+  const version = JSON.stringify(records);
+  if (version === lastVersion) return; // do not reset an actively playing audio/video element on each poll
+  lastVersion = version;
+  $('results').replaceChildren();
+  for (const r of records) {
+    const box=el('article',undefined,'record');
+    box.append(el('h2',new Date(r.started_at*1000).toLocaleString()));
+    if(r.stop_reason==='time_limit') box.append(el('p','已达到 180 秒上限，录制自动结束。','warning'));
+    for(const error of r.errors) box.append(el('p',error,'warning'));
+    for(const [i,f] of r.files.entries()) {
+      const duration=Number(f.duration_seconds||0).toFixed(1);
+      box.append(el('p',`片段 ${i+1} · ${duration} 秒 · ${f.has_video?'有画面轨':'无画面轨'} · ${f.has_audio?'有音轨':'无音轨'}`));
+      if(f.playback) {
+        const player=el(f.has_video?'video':'audio'); player.controls=true; player.preload='metadata';
+        player.src=fileUrl(r.id,f.playback); box.append(player);
+      }
+      if(f.audio) {
+        box.append(el('p','单独回放音频','muted'));
+        const player=el('audio'); player.controls=true; player.preload='metadata';
+        player.src=fileUrl(r.id,f.audio); box.append(player);
+      }
+      if(f.audio_levels) {
+        const levels=f.audio_levels;
+        box.append(el('p',levels.signal_detected
+          ? `检测到声音信号 · 平均电平 ${levels.rms_dbfs} dBFS（仍需回放核验）`
+          : '音轨未检测到明显信号，可能是静音或声音很弱，请回放核验。', levels.signal_detected?'muted':'warning'));
+      }
+      for(const warning of f.warnings) box.append(el('p',warning,'warning'));
+      const downloads=el('p');
+      link(downloads,r.id,f.source,'下载接收原片');
+      if(f.playback) link(downloads,r.id,f.playback,'下载兼容播放版');
+      if(f.audio) link(downloads,r.id,f.audio,'下载 WAV');
+      box.append(downloads);
+    }
+    const details=el('details'); details.append(el('summary','诊断信息'));
+    details.append(el('pre',JSON.stringify(r,null,2)));
+    link(details,r.id,'result.json','下载诊断报告'); link(details,r.id,'uxplay.log','下载接收日志');
+    box.append(details); $('results').append(box);
+  }
+}
+async function poll() {
+  if(pollBusy) return; pollBusy=true;
+  try {
+    const status=await request('/api/status'); const c=status.current;
+    const active=c && ['listening','finalizing'].includes(c.state);
+    $('start').disabled=busy || !!active;
+    $('stop').disabled=busy || !c || c.state!=='listening';
+    $('state').textContent=c ? names[c.state] || c.state : '等待开始';
+    $('elapsed').textContent=c?.state==='listening' ? `${Math.floor(c.elapsed_seconds)} 秒 · 已写入 ${Math.round(c.received_bytes/1024)} KB` : '';
+    $('detail').textContent=c?.state==='listening'
+      ? '请在手机选择 iPhone Media Test 并播放内容。写入字节数不代表已收到有效音视频，保存后会检查文件。'
+      : '采集时 Mac 不外放声音；保存后可以回放。每次开始采集后，需要在手机上选择此接收器。';
+    showRecords(await request('/api/recordings'));
+  } catch(e) { $('state').textContent='验证服务不可用'; $('start').disabled=true; $('stop').disabled=true; }
+  finally { pollBusy=false; }
+}
+async function act(path) {
+  busy=true; $('start').disabled=true; $('stop').disabled=true; $('error').textContent='';
+  try { await request(path,'POST'); }
+  catch(e) { $('error').textContent=e.message; }
+  finally { busy=false; await poll(); }
+}
+$('start').onclick=()=>act('/api/start'); $('stop').onclick=()=>act('/api/stop');
+poll(); setInterval(poll,1000);
+</script>
+</html>

@@ -73,6 +73,18 @@
       <div><b id="st-step"></b><span data-i18n="perAction"></span></div>
     </div>
 
+    <details class="manual" id="recording-panel" hidden open>
+      <summary>音视频采集 / Media capture</summary>
+      <p class="caption">沿用当前投屏，在播放前开始采集。保留接收端音质，按媒体时间同步，每段最多 180 秒。</p>
+      <div class="row">
+        <button id="record-start">开始采集</button>
+        <button id="record-stop" disabled>停止并保存</button>
+        <span id="record-state"></span>
+      </div>
+      <p class="caption" id="record-audio"></p>
+      <div id="record-results"></div>
+    </details>
+
     <details class="plan" id="plan" hidden open><summary data-i18n="plan"></summary><ol id="plan-list"></ol></details>
 
     <div class="wall" id="wall"></div>
@@ -83,5 +95,6 @@
 
 <script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/recording.js"></script>
 </body>
 </html>
